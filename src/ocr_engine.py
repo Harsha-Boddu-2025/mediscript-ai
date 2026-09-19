@@ -4,9 +4,9 @@ ocr_engine.py
 Reads a prescription image with an NVIDIA NIM vision-language model and
 returns a structured JSON record.
 
-Updated for your NVIDIA NIM catalog:
-  - Primary vision model: nemotron-parse-2.0 (document intelligence VLM)
-  - Primary text model: nemotron-3.5-lightning-30b-a3b
+Updated with correct cloud endpoint namespaces:
+  - Primary vision model: nvidia/nemotron-parse-2.0
+  - Primary text model: nvidia/nemotron-3.5-lightning-30b-a3b
 """
 
 import base64
@@ -20,16 +20,16 @@ from PIL import Image
 
 NVIDIA_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 
-# Vision models mapped from your active NVIDIA NIM catalog
+# Vision models with verified namespace prefixes for the cloud endpoint
 VISION_MODELS = [
-    "nemotron-parse-2.0",  # Cutting-edge vision-language model for document/text extraction[cite: 2]
-    "nemotron-ocr-v2",     # Fallback optical character recognition model[cite: 2]
+    "nvidia/nemotron-parse-2.0",           # NVIDIA's primary document intelligence VLM
+    "meta/llama-3.2-11b-vision-instruct",  # Fallback multimodal vision model
 ]
 
 # Text models for the RAG assistant and interaction analysis
 TEXT_MODELS = [
-    "nemotron-3.5-lightning-30b-a3b",  # Fastest 30B MoE model with high accuracy[cite: 2]
-    "nemotron-3-super-120b-a12b",      # High-performance fallback model[cite: 2]
+    "nvidia/nemotron-3.5-lightning-30b-a3b", # Fast, high-accuracy MoE text model
+    "meta/llama-3.1-70b-instruct",           # Fallback text model
 ]
 
 # Kept lightweight to ensure fast payload transmission and avoid timeouts.
