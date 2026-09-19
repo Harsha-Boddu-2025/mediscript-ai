@@ -4,12 +4,9 @@ ocr_engine.py
 Reads a prescription image with an NVIDIA NIM vision-language model and
 returns a structured JSON record.
 
-Updated for the 2026 build.nvidia.com catalog:
-  - Primary vision model: nvidia/nemotron-nano-12b-v2-vl (document intelligence VLM)
-  - Uses the OpenAI-style content array with image_url (base64 data URL)
-
-The NVIDIA API key is read from Streamlit secrets / environment only.
-It is NEVER rendered in the UI and never committed to git.
+Updated for your NVIDIA NIM catalog:
+  - Primary vision model: nemotron-parse-2.0 (document intelligence VLM)
+  - Primary text model: nemotron-3.5-lightning-30b-a3b
 """
 
 import base64
@@ -23,22 +20,19 @@ from PIL import Image
 
 NVIDIA_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 
-# Vision models to try, in order. All work with the same nvapi- key.
-# If NVIDIA renames models again, just update this list from build.nvidia.com/models
+# Vision models mapped from your active NVIDIA NIM catalog
 VISION_MODELS = [
-    "nvidia/nemotron-nano-12b-v2-vl",    # current: document-intelligence VLM (best for prescriptions)
-    "nvidia/nemotron-3-nano-omni",        # newer omni model, if available on your account
-    "meta/llama-3.2-90b-vision-instruct", # legacy fallback if still hosted
+    "nemotron-parse-2.0",  # Cutting-edge vision-language model for document/text extraction[cite: 2]
+    "nemotron-ocr-v2",     # Fallback optical character recognition model[cite: 2]
 ]
 
-# Text models for the RAG assistant, tried in order.
+# Text models for the RAG assistant and interaction analysis
 TEXT_MODELS = [
-    "meta/llama-3.1-70b-instruct",
-    "nvidia/llama-3.1-nemotron-70b-instruct",
-    "nvidia/nemotron-nano-12b-v2-vl",    # VLMs also handle text-only chat
+    "nemotron-3.5-lightning-30b-a3b",  # Fastest 30B MoE model with high accuracy[cite: 2]
+    "nemotron-3-super-120b-a12b",      # High-performance fallback model[cite: 2]
 ]
 
-# Kept smaller to ensure rapid upload and lower token processing latency.
+# Kept lightweight to ensure fast payload transmission and avoid timeouts.
 MAX_INLINE_BYTES = 120_000
 
 EXTRACTION_PROMPT = """You are an expert clinical pharmacist and medical transcriptionist.
@@ -81,13 +75,13 @@ def get_api_key() -> str:
 
 
 def compress_image(file_bytes: bytes) -> str:
-    """Resize/compress the upload so the base64 payload stays lightweight and fast."""
+    """Resize and compress upload to keep base64 payload fast and light."""
     img = Image.open(io.BytesIO(file_bytes))
     if img.mode != "RGB":
         img = img.convert("RGB")
 
     quality = 85
-    max_side = 900  # Reduced to speed up server-side optical inference and avoid timeouts
+    max_side = 900  # Optimized size to prevent processing lag
     while True:
         w, h = img.size
         scale = min(1.0, max_side / max(w, h))
@@ -115,7 +109,6 @@ def _extract_json(text: str) -> dict:
 def _vision_payloads(model: str, b64: str) -> list[dict]:
     """Both message formats NVIDIA models use, tried in order."""
     data_url = f"data:image/jpeg;base64,{b64}"
-    # Modern OpenAI-style content array (Nemotron VL family)
     modern = {
         "model": model,
         "messages": [{
@@ -128,7 +121,6 @@ def _vision_payloads(model: str, b64: str) -> list[dict]:
         "max_tokens": 1500,
         "temperature": 0.10,
     }
-    # Legacy inline <img> tag format (older Llama/NeVA vision NIMs)
     legacy = {
         "model": model,
         "messages": [{
@@ -157,14 +149,14 @@ def extract_prescription(file_bytes: bytes) -> dict:
     for model in VISION_MODELS:
         for payload in _vision_payloads(model, b64):
             try:
-                # Increased timeout to 180 seconds to prevent sudden dropouts on slow queues
+                # 180s timeout buffer to prevent premature hanging
                 resp = requests.post(NVIDIA_CHAT_URL, headers=headers, json=payload, timeout=180)
                 if resp.status_code == 200:
                     content = resp.json()["choices"][0]["message"]["content"]
                     return _extract_json(content)
                 last_error = f"{model}: HTTP {resp.status_code} - {resp.text[:200]}"
                 if resp.status_code == 404:
-                    break  # model not hosted; skip to next model, don't retry legacy format
+                    break
             except Exception as exc:
                 last_error = f"{model}: {exc}"
 
@@ -202,3 +194,5 @@ def ask_llm(prompt: str, system: str = "", max_tokens: int = 900) -> str:
         except Exception as exc:
             last_error = f"{model}: {exc}"
     raise RuntimeError(f"All text models failed. Last error: {last_error}")
+ 
+
