@@ -26,20 +26,20 @@ NVIDIA_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 # Vision models to try, in order. All work with the same nvapi- key.
 # If NVIDIA renames models again, just update this list from build.nvidia.com/models
 VISION_MODELS = [
-    "nvidia/nemotron-nano-12b-v2-vl",   # current: document-intelligence VLM (best for prescriptions)
-    "nvidia/nemotron-3-nano-omni",       # newer omni model, if available on your account
-    "meta/llama-3.2-90b-vision-instruct" # legacy fallback if still hosted
+    "nvidia/nemotron-nano-12b-v2-vl",    # current: document-intelligence VLM (best for prescriptions)
+    "nvidia/nemotron-3-nano-omni",        # newer omni model, if available on your account
+    "meta/llama-3.2-90b-vision-instruct", # legacy fallback if still hosted
 ]
 
 # Text models for the RAG assistant, tried in order.
 TEXT_MODELS = [
     "meta/llama-3.1-70b-instruct",
     "nvidia/llama-3.1-nemotron-70b-instruct",
-    "nvidia/nemotron-nano-12b-v2-vl",   # VLMs also handle text-only chat
+    "nvidia/nemotron-nano-12b-v2-vl",    # VLMs also handle text-only chat
 ]
 
-# Keep the base64 payload comfortably small for inline requests.
-MAX_INLINE_BYTES = 170_000
+# Kept smaller to ensure rapid upload and lower token processing latency.
+MAX_INLINE_BYTES = 120_000
 
 EXTRACTION_PROMPT = """You are an expert clinical pharmacist and medical transcriptionist.
 Carefully read this prescription image (it may be handwritten, printed, or a photo of a label).
@@ -74,7 +74,6 @@ def get_api_key() -> str:
     if not key:
         try:
             import streamlit as st
-
             key = st.secrets.get("NVIDIA_API_KEY", "")
         except Exception:
             key = ""
@@ -82,13 +81,13 @@ def get_api_key() -> str:
 
 
 def compress_image(file_bytes: bytes) -> str:
-    """Resize/compress the upload so the base64 payload stays small."""
+    """Resize/compress the upload so the base64 payload stays lightweight and fast."""
     img = Image.open(io.BytesIO(file_bytes))
     if img.mode != "RGB":
         img = img.convert("RGB")
 
-    quality = 90
-    max_side = 1400
+    quality = 85
+    max_side = 900  # Reduced to speed up server-side optical inference and avoid timeouts
     while True:
         w, h = img.size
         scale = min(1.0, max_side / max(w, h))
@@ -96,7 +95,7 @@ def compress_image(file_bytes: bytes) -> str:
         buf = io.BytesIO()
         work.save(buf, format="JPEG", quality=quality, optimize=True)
         data = buf.getvalue()
-        if len(base64.b64encode(data)) <= MAX_INLINE_BYTES or (quality <= 40 and max_side <= 700):
+        if len(base64.b64encode(data)) <= MAX_INLINE_BYTES or (quality <= 40 and max_side <= 500):
             return base64.b64encode(data).decode()
         quality -= 10
         if quality < 40:
@@ -158,7 +157,8 @@ def extract_prescription(file_bytes: bytes) -> dict:
     for model in VISION_MODELS:
         for payload in _vision_payloads(model, b64):
             try:
-                resp = requests.post(NVIDIA_CHAT_URL, headers=headers, json=payload, timeout=120)
+                # Increased timeout to 180 seconds to prevent sudden dropouts on slow queues
+                resp = requests.post(NVIDIA_CHAT_URL, headers=headers, json=payload, timeout=180)
                 if resp.status_code == 200:
                     content = resp.json()["choices"][0]["message"]["content"]
                     return _extract_json(content)
@@ -170,7 +170,7 @@ def extract_prescription(file_bytes: bytes) -> dict:
 
     raise RuntimeError(
         "All vision models failed. Check the current model names at "
-        f"build.nvidia.com/models and update VISION_MODELS. Last error: {last_error}"
+        f"[build.nvidia.com/models](https://build.nvidia.com/models) and update VISION_MODELS. Last error: {last_error}"
     )
 
 
