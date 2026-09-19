@@ -1,39 +1,16 @@
 """
-ocr_engine.py
--------------
-Reads a prescription image with an NVIDIA NIM vision-language model and
+ocr_engine.py (Gemini Version)
+------------------------------
+Reads a prescription image using Google's Gemini API and
 returns a structured JSON record.
-
-Updated with correct cloud endpoint namespaces:
-  - Primary vision model: nvidia/nemotron-parse-2.0
-  - Primary text model: nvidia/nemotron-3.5-lightning-30b-a3b
 """
 
-import base64
-import io
 import json
 import os
 import re
-
-import requests
+import google.generativeai as genai
 from PIL import Image
-
-NVIDIA_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-
-# Vision models with verified namespace prefixes for the cloud endpoint
-VISION_MODELS = [
-    "nvidia/nemotron-parse-2.0",           # NVIDIA's primary document intelligence VLM
-    "meta/llama-3.2-11b-vision-instruct",  # Fallback multimodal vision model
-]
-
-# Text models for the RAG assistant and interaction analysis
-TEXT_MODELS = [
-    "nvidia/nemotron-3.5-lightning-30b-a3b", # Fast, high-accuracy MoE text model
-    "meta/llama-3.1-70b-instruct",           # Fallback text model
-]
-
-# Kept lightweight to ensure fast payload transmission and avoid timeouts.
-MAX_INLINE_BYTES = 120_000
+import io
 
 EXTRACTION_PROMPT = """You are an expert clinical pharmacist and medical transcriptionist.
 Carefully read this prescription image (it may be handwritten, printed, or a photo of a label).
@@ -63,38 +40,15 @@ If a field is not present in the image, use an empty string. Never invent medici
 
 
 def get_api_key() -> str:
-    """Fetch the NVIDIA key from server-side secrets only."""
-    key = os.environ.get("NVIDIA_API_KEY", "")
+    """Fetch the Gemini key from server-side secrets only."""
+    key = os.environ.get("GEMINI_API_KEY", "")
     if not key:
         try:
             import streamlit as st
-            key = st.secrets.get("NVIDIA_API_KEY", "")
+            key = st.secrets.get("GEMINI_API_KEY", "")
         except Exception:
             key = ""
     return key
-
-
-def compress_image(file_bytes: bytes) -> str:
-    """Resize and compress upload to keep base64 payload fast and light."""
-    img = Image.open(io.BytesIO(file_bytes))
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-
-    quality = 85
-    max_side = 900  # Optimized size to prevent processing lag
-    while True:
-        w, h = img.size
-        scale = min(1.0, max_side / max(w, h))
-        work = img.resize((int(w * scale), int(h * scale))) if scale < 1.0 else img
-        buf = io.BytesIO()
-        work.save(buf, format="JPEG", quality=quality, optimize=True)
-        data = buf.getvalue()
-        if len(base64.b64encode(data)) <= MAX_INLINE_BYTES or (quality <= 40 and max_side <= 500):
-            return base64.b64encode(data).decode()
-        quality -= 10
-        if quality < 40:
-            quality = 60
-            max_side = int(max_side * 0.8)
 
 
 def _extract_json(text: str) -> dict:
@@ -106,93 +60,56 @@ def _extract_json(text: str) -> dict:
     return json.loads(match.group(0))
 
 
-def _vision_payloads(model: str, b64: str) -> list[dict]:
-    """Both message formats NVIDIA models use, tried in order."""
-    data_url = f"data:image/jpeg;base64,{b64}"
-    modern = {
-        "model": model,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": EXTRACTION_PROMPT},
-                {"type": "image_url", "image_url": {"url": data_url}},
-            ],
-        }],
-        "max_tokens": 1500,
-        "temperature": 0.10,
-    }
-    legacy = {
-        "model": model,
-        "messages": [{
-            "role": "user",
-            "content": f'{EXTRACTION_PROMPT} <img src="{data_url}" />',
-        }],
-        "max_tokens": 1500,
-        "temperature": 0.10,
-    }
-    return [modern, legacy]
-
-
 def extract_prescription(file_bytes: bytes) -> dict:
-    """Main entry: image bytes -> structured prescription dict."""
+    """Main entry: image bytes -> structured prescription dict using Gemini."""
     api_key = get_api_key()
     if not api_key:
         raise RuntimeError(
-            "NVIDIA_API_KEY is not configured. Add it in Streamlit Secrets "
+            "GEMINI_API_KEY is not configured. Add it in Streamlit Secrets "
             "(App settings -> Secrets) or as an environment variable."
         )
 
-    b64 = compress_image(file_bytes)
-    headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+    genai.configure(api_key=api_key)
+    
+    # Use Gemini 2.5 Flash / 1.5 Flash (fastest and best for multimodal extraction)
+    model = genai.GenerativeModel("gemini-2.5-flash")
 
-    last_error = None
-    for model in VISION_MODELS:
-        for payload in _vision_payloads(model, b64):
-            try:
-                # 180s timeout buffer to prevent premature hanging
-                resp = requests.post(NVIDIA_CHAT_URL, headers=headers, json=payload, timeout=180)
-                if resp.status_code == 200:
-                    content = resp.json()["choices"][0]["message"]["content"]
-                    return _extract_json(content)
-                last_error = f"{model}: HTTP {resp.status_code} - {resp.text[:200]}"
-                if resp.status_code == 404:
-                    break
-            except Exception as exc:
-                last_error = f"{model}: {exc}"
+    # Load image from bytes
+    image = Image.open(io.BytesIO(file_bytes))
+    if image.mode != "RGB":
+        image = image.convert("RGB")
 
-    raise RuntimeError(
-        "All vision models failed. Check the current model names at "
-        f"[build.nvidia.com/models](https://build.nvidia.com/models) and update VISION_MODELS. Last error: {last_error}"
-    )
+    try:
+        response = model.generate_content([EXTRACTION_PROMPT, image])
+        return _extract_json(response.text)
+    except Exception as exc:
+        raise RuntimeError(f"Gemini prescription extraction failed: {exc}")
 
 
 def ask_llm(prompt: str, system: str = "", max_tokens: int = 900) -> str:
     """Text-only call used by the RAG assistant and interaction analysis."""
     api_key = get_api_key()
     if not api_key:
-        raise RuntimeError("NVIDIA_API_KEY is not configured.")
+        raise RuntimeError("GEMINI_API_KEY is not configured.")
 
-    messages = []
+    genai.configure(api_key=api_key)
+    
+    # Configure system instruction if provided
+    generation_config = genai.GenerationConfig(
+        max_output_tokens=max_tokens,
+        temperature=0.25
+    )
+    
+    model_name = "gemini-2.5-flash"
     if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
-    headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+        model = genai.GenerativeModel(model_name, system_instruction=system)
+    else:
+        model = genai.GenerativeModel(model_name)
 
-    last_error = None
-    for model in TEXT_MODELS:
-        payload = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": 0.25,
-        }
-        try:
-            resp = requests.post(NVIDIA_CHAT_URL, headers=headers, json=payload, timeout=120)
-            if resp.status_code == 200:
-                return resp.json()["choices"][0]["message"]["content"]
-            last_error = f"{model}: HTTP {resp.status_code}"
-        except Exception as exc:
-            last_error = f"{model}: {exc}"
-    raise RuntimeError(f"All text models failed. Last error: {last_error}")
+    try:
+        response = model.generate_content(prompt, generation_config=generation_config)
+        return response.text
+    except Exception as exc:
+        raise RuntimeError(f"Gemini text chat failed: {exc}")
  
 
