@@ -3,7 +3,7 @@ assistant.py
 ------------
 The 'AG' in RAG: takes the retrieved FDA/RxNorm context and generates
 grounded answers, interaction analysis, and personalized recommendations
-using an NVIDIA text LLM.
+using your text LLM engine.
 """
 
 from .ocr_engine import ask_llm
@@ -29,7 +29,8 @@ def analyze_interactions(context: str, med_names: list[str]) -> str:
         "If the context mentions no interactions, say that no interactions were found in the "
         "retrieved labels, but that this is not a guarantee of safety."
     )
-    return ask_llm(prompt, system=SYSTEM, max_tokens=900)
+    # Increased max_tokens to prevent text cutoff during deep analysis
+    return ask_llm(prompt, system=SYSTEM, max_tokens=1500)
 
 
 def generate_recommendations(context: str, patient: dict) -> str:
@@ -44,7 +45,8 @@ def generate_recommendations(context: str, patient: dict) -> str:
         "5. **Call your doctor if** - red-flag symptoms from the warnings\n"
         "Keep it warm, clear, and grounded in the context only."
     )
-    return ask_llm(prompt, system=SYSTEM, max_tokens=1100)
+    # Increased max_tokens to ensure complete schedule and guideline generation
+    return ask_llm(prompt, system=SYSTEM, max_tokens=2000)
 
 
 def chat_answer(context: str, history: list[dict], question: str) -> str:
@@ -55,4 +57,4 @@ def chat_answer(context: str, history: list[dict], question: str) -> str:
         f"PATIENT'S QUESTION: {question}\n\n"
         "Answer the question using only the context. Be concise and kind."
     )
-    return ask_llm(prompt, system=SYSTEM, max_tokens=800)
+    return ask_llm(prompt, system=SYSTEM, max_tokens=1000)
